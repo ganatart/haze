@@ -1,7 +1,16 @@
 import cv2
+import torch
 import numpy as np
+from skimage.color import rgb2gray
 
 from PIL import Image
+
+try:
+	from zoedepth.models.zoedepth.zoedepth_v1 import ZoeDepth
+except:
+	raise ImportError("Error while importing zoedepth, try download zoedepth using shell script.")
+
+DEVICE = "cuda" if torch.cuda.is_available else "cpu"
 
 def DarkChannel(img: Image.Image | np.ndarray, shape: str = "rect", ksize: int = 15) -> Image.Image | np.ndarray:
 	"""
@@ -23,7 +32,7 @@ def DarkChannel(img: Image.Image | np.ndarray, shape: str = "rect", ksize: int =
 
 		Examples
 		--------
-		>>> img = Image.open("example.jpg")
+		>>> img = Image.open("haze.jpg")
 		>>> dcp = DarkChannelPrior(img)
 		>>> dcp.save("dark_channel.png")
 	"""
@@ -78,11 +87,11 @@ def AtmLight(img: Image.Image | np.ndarray, dark_channel: Image.Image | None = N
 
 		Examples
 		--------
-		>>> img = Image.open("example.jpg")
+		>>> img = Image.open("haze.jpg")
 		>>> AtmLight(img)
 		(62, 62, 71)
 
-		>>> img = Image.open("example.jpg")
+		>>> img = Image.open("haze.jpg")
 		>>> img = np.array(img).astype(np.float32) / 255
 		>>> AtmLight(img)
 		(0.246818, 0.24618295, 0.27960142)
@@ -126,18 +135,125 @@ def AtmLight(img: Image.Image | np.ndarray, dark_channel: Image.Image | None = N
 	
 	return tuple(atm)
 
+def GuidedFilter(guide: Image.Image | np.ndarray, img: Image.Image | np.ndarray, sz: int = 15, eps: float = 1e-6) -> Image.Image | np.ndarray:
+	"""
+		Perform guided filtering for given image and guidance
+
+		Parameters
+		----------
+		guide: Image.Image | np.ndarray
+			Image to be used as an guidance
+		img: Image.Image | np.ndarray
+			Image to perform filtering
+		ksize: int
+			Size of filter kernel
+		eps: float
+			Small value of float to prevent zero division error
+		
+		Returns
+		-------
+		res: Image.Image | np.ndarray
+			Result of guided filtering
+			return Image if given img is Image
+			return float32 type numpy array if given img is numpy
+
+		Examples
+		--------
+		>>> img = Image.open("img.png")
+		>>> dcp = Image.open("dcp.png")
+		>>> filtered = GuidedFilter(img, dcp)
+	"""
+
+	is_numpy = type(img) == np.ndarray
+
+	I = guide
+	p = img
+
+	# convert guide image into gray float scale image
+	
+	I = np.array(guide)
+	if I.dtype == np.uint8:
+		I = I.astype(np.float32) / 255
+	I = rgb2gray(I)
+
+	# convert input image into float scale image
+	p = np.array(p)
+	if p.dtype == np.uint8:
+		p = p.astype(np.float32) / 255
+
+	# perform guided filtering
+	meanI = cv2.blur(I, (sz, sz))
+	meanP = cv2.blur(p, (sz, sz))
+	corrI = cv2.blur(I * I, (sz, sz))
+	corrIp = cv2.blur(I * p, (sz, sz))
+
+	varI = corrI - meanI * meanI
+	covIp = corrIp - meanI * meanP
+
+	a = covIp / (varI + eps)
+	b = meanP - a * meanI
+
+	meanA = cv2.blur(a, (sz, sz))
+	meanB = cv2.blur(b, (sz, sz))
+
+	res = meanA * I + meanB
+	res = np.clip(res, 0, 1)
+
+	if not is_numpy:
+		# convert numpy image into Image.Image
+		res = (res * 255).astype(np.uint8)
+		res = Image.fromarray(res)	
+
+	return res
+
+def GetDepth(img: Image.Image | np.ndarray, model: ZoeDepth, filter: bool = True):
+	"""
+		Perform guided filtering for given image and guidance
+
+		Parameters
+		----------
+		guide: Image.Image | np.ndarray
+			Image to be used as an guidance
+		img: Image.Image | np.ndarray
+			Image to perform filtering
+		ksize: int
+			Size of filter kernel
+		eps: float
+			Small value of float to prevent zero division error
+		
+		Returns
+		-------
+		res: Image.Image | np.ndarray
+			Result of guided filtering
+			return Image if given img is Image
+			return float32 type numpy array if given img is numpy
+
+		Examples
+		--------
+		>>> img = Image.open("img.png")
+		>>> dcp = Image.open("dcp.png")
+		>>> filtered = GuidedFilter(img, dcp)
+	"""
+	
+	if DEVICE == "cpu":
+		raise UserWarning("CUDA device is not available. Loading model on cpu.")
+
+	depth = model.infer_pil(img)
+	depth = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
+
+	depth = (depth * 255).astype(np.uint8)
+	depth = Image.fromarray(depth)
+	depth.save("depth.png")
+	
 def main():
-	TEST_IMAGE_PATH = "./example.jpg"
+	CLEAR_IMAGE_PATH = "./clear.png"
+	HAZE_IMAGE_PATH = "./haze.png"
 
 	# extract dark channel
-	img = Image.open(TEST_IMAGE_PATH)
-	dcp = DarkChannel(img, shape = "rect")
-	dcp.save("dark_channel.png")
+	clear = Image.open(CLEAR_IMAGE_PATH)
+	model_zoe_n = torch.hub.load("isl-org/ZoeDepth", "ZoeD_N", pretrained = True, verbose = False)
 
-	# extract atm light
-	img = np.array(img).astype(np.float32) / 255
-	atm = AtmLight(img)
-	print("Atm Light", atm)
+	GetDepth(clear, model_zoe_n.to(DEVICE))
 
 if __name__ == "__main__":
 	main()
